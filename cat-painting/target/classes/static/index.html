@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- 追加: 空のファビコンで404回避 -->
+    <link rel="icon" href="data:,">
+    <title>猫の塗り絵アプリ</title>
+    <style>
+      :root { color-scheme: light dark; }
+      html, body { height: 100%; width: 100vw; margin: 0; padding: 0; box-sizing: border-box; }
+      body { min-height: 100vh; min-width: 100vw; height: 100vh; width: 100vw; display: flex; flex-direction: column; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; overflow: auto; }
+      header { padding: 8px 12px; background: #222; color: #fff; }
+      .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .palette { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; max-width: 70%; }
+      .swatch { display: inline-flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 6px; cursor: pointer; user-select: none; background: #333; color: #fff; }
+      .swatch[data-selected="true"] { outline: 2px solid #fff; }
+      .swatch .chip { width: 18px; height: 18px; border-radius: 3px; border: 1px solid #0006; }
+      .counts { font-size: 12px; opacity: 0.9; }
+      .actions { margin-left: auto; display: flex; gap: 8px; }
+      button { padding: 6px 10px; border-radius: 6px; border: 1px solid #0000; cursor: pointer; }
+      input[type="file"] { color: #fff; }
+      .wrap { flex: 1 1 auto; position: relative; background: #eee; width: 100vw; /* heightはflexで決まる */ min-height: 0; min-width: 0; overflow: auto; }
+      /* 変更: キャンバスはJSで盤サイズ(px)に合わせる。ここでは最小/最大や固定幅を外す */
+      canvas { display: block; position: relative; width: auto; height: auto; touch-action: none; background: #fff; margin: 0; }
+      .hint { padding: 4px 12px; background: #f6f6f6; color: #333; font-size: 14px; border-top: 1px solid #ddd; }
+
+      /* アップロードガイド */
+      .upload-guide {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        text-align: center;
+        color: #555;
+        z-index: 1;
+      }
+      .upload-guide button {
+        display: block;
+        margin: 12px auto;
+        background: #2196F3;
+        color: white;
+        border: none;
+        padding: 10px 20px;
+      }
+      .upload-guide.hidden { display: none; }
+
+      /* ローディングオーバーレイ */
+      .loading-overlay {
+        position: absolute;
+        inset: 0;
+        background: rgba(0,0,0,0.7);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        color: white;
+        z-index: 2;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.3s;
+      }
+      .loading-overlay.active {
+        opacity: 1;
+        pointer-events: all;
+      }
+      .loading-spinner {
+        width: 50px;
+        height: 50px;
+        border: 5px solid #f3f3f3;
+        border-top: 5px solid #3498db;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        margin-bottom: 15px;
+      }
+      .progress-text { font-size: 18px; margin-bottom: 10px; }
+      .progress-detail { font-size: 14px; margin-bottom: 5px; opacity: 0.8; }
+      @keyframes spin { 0% { transform: rotate(0deg);} 100% { transform: rotate(360deg);} }
+
+      @media (prefers-color-scheme: dark) {
+        .wrap { background: #111; }
+        .hint { background: #1a1a1a; color: #ccc; border-color: #333; }
+        .upload-guide { color: #bbb; }
+      }
+    </style>
+    <!-- jsPDFを読み込み（PDF生成用） -->
+    <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js" crossorigin="anonymous"></script>
+  </head>
+  <body>
+    <header>
+      <div class="toolbar">
+        <strong>猫の塗り絵アプリ (516×516)</strong>
+        <label class="upload-btn">
+          <input id="imgInput" type="file" accept="image/*" />
+        </label>
+        <div class="palette" id="palette"></div>
+        <div class="counts" id="counts"></div>
+        <div class="actions">
+          <button id="reveal">答えを表示</button>
+          <button id="reset">リセット</button>
+          <button id="savePdf">PDF保存</button>
+          <!-- 追加: ズーム操作 -->
+          <button id="zoomOut" title="縮小 (-)">−</button>
+          <span id="zoomLabel" style="min-width:48px;display:inline-block;text-align:center;">x10.0</span>
+          <button id="zoomIn" title="拡大 (+)">＋</button>
+          <button id="fit" title="全体表示 (0/F)">全体表示</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="wrap">
+      <canvas id="board"></canvas>
+
+      <div class="upload-guide" id="uploadGuide">
+        <h2>画像をアップロードしてください</h2>
+        <p>516×516の塗り絵が自動生成されます<br>色数は画像に応じて自動決定</p>
+        <button id="guideUploadBtn">画像を選択</button>
+      </div>
+
+      <div class="loading-overlay" id="loadingOverlay">
+        <div class="loading-spinner"></div>
+        <div class="progress-text" id="progressText">画像処理中...</div>
+        <div class="progress-detail" id="progressDetail">準備中...</div>
+      </div>
+    </div>
+
+    <div class="hint">パレットを選んでマスをクリック。数字キー(1-9/0=10)でも色選択。答え表示トグル対応。</div>
+
+    <script>
+      // 設定
+      const SIZE = 516;
+      const BACKGROUND = '#ffffff';
+      // セル拡大スケール（10倍）
+      const CELL_SCALE = 10;
+      // 追加: ズーム係数（CELL_SCALEを初期値にし、最小/最大を定義）
+      let zoom = CELL_SCALE;
+      const MIN_ZOOM = 0.1;
+      const MAX_ZOOM = 20;
+      // 追加: 背景ランダム色のためのシードと関数
+      const BG_SEED = (self.crypto?.getRandomValues)
+        ? self.crypto.getRandomValues(new Uint32Array(1))[0]
+        : Math.floor(Math.random() * 2**32);
+
+      function bgRand(x, y) {
+        // 座標とシードから安定した擬似乱数[0,1)
+        let t = (x | 0) ^ (y << 16) ^ BG_SEED;
+        t = Math.imul(t ^ (t >>> 13), 1274126177);
+        t ^= t >>> 16;
+        return (t >>> 0) / 4294967295;
+      }
+      function bgColorAt(x, y) {
+        // 淡いパステル（明るい背景にして数字を見やすく）
+        const r1 = bgRand(x * 3 + 1, y * 5 + 7);
+        const r2 = bgRand(x * 7 + 11, y * 9 + 13);
+        const h = Math.floor(r1 * 360);           // 0..360
+        const s = 20 + Math.floor(r2 * 20);       // 20..40%
+        const l = 88 + Math.floor(bgRand(x+17, y+19) * 8); // 88..96%
+        return `hsl(${h} ${s}% ${l}%)`;
+      }
+
+      // パレット初期値（アップロード後に自動更新）
+      let PALETTE = [
+        { id:1, name:'黒', color:'#000000' },
+        { id:2, name:'暗色', color:'#663333' },
+        { id:3, name:'中色', color:'#aa5555' },
+        { id:4, name:'明色', color:'#cc9966' }
+      ];
+      let IDS    = PALETTE.map(p => p.id);
+      let COLORS = Object.fromEntries(PALETTE.map(p => [p.id, p.color]));
+      let NAMES  = Object.fromEntries(PALETTE.map(p => [p.id, p.name]));
+
+      // DOM
+      const canvas     = document.getElementById('board');
+      const ctx        = canvas.getContext('2d', { alpha: false });
+      const paletteEl  = document.getElementById('palette');
+      const countsEl   = document.getElementById('counts');
+      const revealEl   = document.getElementById('reveal');
+      const resetEl    = document.getElementById('reset');
+      const imgInput   = document.getElementById('imgInput');
+      const uploadGuide = document.getElementById('uploadGuide');
+      const guideUploadBtn = document.getElementById('guideUploadBtn');
+      const loadingOverlay = document.getElementById('loadingOverlay');
+      const progressText = document.getElementById('progressText');
+      const progressDetail = document.getElementById('progressDetail');
+      // 追加: PDF保存ボタン参照
+      const savePdfEl = document.getElementById('savePdf');
+      // 追加: ズームUI参照
+      const zoomInEl = document.getElementById('zoomIn');
+      const zoomOutEl = document.getElementById('zoomOut');
+      const fitEl = document.getElementById('fit');
+      const zoomLabelEl = document.getElementById('zoomLabel');
+
+      // ローディングUI
+      function showLoading(message, detail = '') {
+        progressText.textContent = message;
+        progressDetail.textContent = detail;
+        loadingOverlay.classList.add('active');
+      }
+      function hideLoading() {
+        loadingOverlay.classList.remove('active');
+      }
+
+      // 状態
+      let showAnswer = false;
+      let hasImage = false;
+      let selected = 1;
+
+      function emptyCanvas() {
+        return Array.from({ length: SIZE }, () => Array(SIZE).fill(0));
+      }
+      let ANSWER = emptyCanvas();
+
+      const stateKey = 'cat-pbn-v5-auto-516';
+      let USER = loadState() ?? emptyCanvas();
+      function loadState() { try { const s = localStorage.getItem(stateKey); return s ? JSON.parse(s) : null; } catch { return null; } }
+      function saveState() { try { localStorage.setItem(stateKey, JSON.stringify(USER)); } catch {} }
+
+      // パレットUI
+      function renderPalette() {
+        paletteEl.innerHTML = '';
+        if (!hasImage) return;
+        for (const k of IDS) {
+          const btn = document.createElement('div');
+          btn.className = 'swatch';
+          btn.dataset.selected = String(selected === k);
+          btn.setAttribute('role','button');
+          btn.setAttribute('tabindex','0');
+          btn.title = `色${k} (${NAMES[k]})`;
+          btn.addEventListener('click', () => { selected = k; renderPalette(); draw(); });
+          btn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { selected = k; renderPalette(); draw(); }});
+          const chip = document.createElement('span');
+          chip.className = 'chip';
+          chip.style.background = COLORS[k];
+          const {r,g,b} = hexToRgb(COLORS[k]);
+          const lum = (0.299*r + 0.587*g + 0.114*b) / 255;
+          if (lum < 0.3) chip.style.boxShadow = 'inset 0 0 0 1px #fff8';
+          const label = document.createElement('span');
+          label.textContent = `#${k} ${NAMES[k]}`;
+          btn.append(chip, label);
+          paletteEl.appendChild(btn);
+        }
+      }
+
+      // カウント
+      function renderCounts() {
+        if (!hasImage) { countsEl.textContent = ''; return; }
+        const total = Object.fromEntries(IDS.map(k=>[k,0]));
+        const done  = Object.fromEntries(IDS.map(k=>[k,0]));
+        for (let y=0;y<SIZE;y++) for (let x=0;x<SIZE;x++) {
+          const ans = ANSWER[y][x];
+          if (ans === 0) continue;
+          total[ans]++; if (USER[y][x] === ans) done[ans]++;
+        }
+        countsEl.textContent = IDS.map(k=>`#${k}:${done[k]}/${total[k]}`).join('  ');
+      }
+
+      // 盤のCSSサイズ（px）とセルサイズ（px）を保持
+      let cellPx = 0;
+      let boardW = 0;
+      let boardH = 0;
+
+      // DPR対応リサイズ: ラッパーの可視領域から基準セルを計算し、キャンバスCSSサイズ=盤サイズに設定
+      function resizeCanvas() {
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        const wrap = canvas.parentElement;
+        const vw = Math.max(1, wrap.clientWidth);
+        const vh = Math.max(1, wrap.clientHeight);
+
+        // 変更: baseCellは小数で計算（フィットで全体を見せるため）
+        const baseCell = Math.min(vw, vh) / SIZE;
+        // 現在のズームを反映（最小0.1px/セルまで許可）
+        cellPx = Math.max(0.1, baseCell * zoom);
+         boardW = cellPx * SIZE;
+         boardH = cellPx * SIZE;
+
+         // CSSサイズ（スクロール対象）
+         canvas.style.width = `${boardW}px`;
+         canvas.style.height = `${boardH}px`;
+
+         // 実ピクセル（DPR対応）
+         canvas.width = Math.floor(boardW * dpr);
+         canvas.height = Math.floor(boardH * dpr);
+         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
++        updateZoomLabel();
+         draw();
+      }
+      window.addEventListener('resize', resizeCanvas);
+      window.addEventListener('orientationchange', resizeCanvas);
+      window.addEventListener('load', () => { renderPalette(); resizeCanvas(); });
+
+      // キー入力（最大10色まで）
+      window.addEventListener('keydown', (e) => {
+        if (!hasImage) return;
+        const num = parseInt(e.key);
+        if (!isNaN(num) && num >= 0 && num <= 9) {
+          const colorId = num === 0 ? 10 : num;
+          if (IDS.includes(colorId)) { selected = colorId; renderPalette(); draw(); }
+        }
+      });
+
+      // 描画
+      function draw() {
+        const w = canvas.clientWidth, h = canvas.clientHeight;
+        ctx.clearRect(0, 0, w, h);
+
+        if (!hasImage) {
+          ctx.fillStyle = BACKGROUND;
+          ctx.fillRect(0, 0, w, h);
+          return;
+        }
+
+        const cell = cellPx;
+        const padX = 0;
+        const padY = 0;
+
+        for (let y=0;y<SIZE;y++) for (let x=0;x<SIZE;x++) {
+          // 変更: ユーザーが塗ったセル(USER>0)は「答え表示中でも」常に優先
+          const u = USER[y][x];
+          const v = (u > 0) ? u : (showAnswer ? ANSWER[y][x] : 0);
+          ctx.fillStyle = (v === 0) ? bgColorAt(x, y) : COLORS[v];
+          ctx.fillRect(padX + x*cell, padY + y*cell, cell, cell);
+        }
+
+        // グリッド
+        ctx.strokeStyle = '#00000020';
+        ctx.lineWidth = 1; ctx.beginPath();
+        for (let i=0;i<=SIZE;i++) {
+          ctx.moveTo(padX, padY + i*cell); ctx.lineTo(padX + SIZE*cell, padY + i*cell);
+          ctx.moveTo(padX + i*cell, padY); ctx.lineTo(padX + i*cell, padY + SIZE*cell);
+        }
+        ctx.stroke();
+
+        // 数字（未塗りだけ。背景0も表示）
+        if (!showAnswer) {
+          ctx.fillStyle = '#000000aa';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          const fontPx = computeNumberFontPx(cell);
+          ctx.font = `${fontPx}px system-ui, -apple-system, Segoe UI, Roboto, sans-serif`;
+
+          for (let y=0;y<SIZE;y++) for (let x=0;x<SIZE;x++) {
+            if (USER[y][x] === 0) {
+              const n = ANSWER[y][x];
+              ctx.fillText(String(n),
+                padX + x*cell + cell/2,
+                padY + y*cell + cell/2 + 0.5
+              );
+            }
+          }
+        }
+        renderCounts();
+      }
+
+      // 追加: 数字フォントサイズをセルに収めるユーティリティ
+      function computeNumberFontPx(cell) {
+        // パディングを確保
+        const margin = Math.max(2, Math.floor(cell * 0.15));
+        const maxW = Math.max(1, cell - margin * 2);
+        const maxH = Math.max(1, cell - margin * 2);
+
+        // 計測用の基準フォントサイズ
+        const base = 32;
+        const family = 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+        // 最大桁数のラベルを使って計測（例: 12色なら "12"）
+        const ref = String(Math.max(...IDS));
+
+        ctx.save();
+        ctx.font = `${base}px ${family}`;
+        const m = ctx.measureText(ref);
+        const w = Math.max(1, m.width);
+        const h = Math.max(1,
+          (m.actualBoundingBoxAscent || base * 0.8) +
+          (m.actualBoundingBoxDescent || base * 0.2)
+        );
+        ctx.restore();
+
+        const scale = Math.max(0.1, Math.min(maxW / w, maxH / h));
+        return Math.floor(base * scale);
+      }
+
+      // 入力
+      function posToCell(e) {
+        if (!hasImage) return null;
+        const rect = canvas.getBoundingClientRect();
+        const x = Math.floor((e.clientX - rect.left) / cellPx);
+        const y = Math.floor((e.clientY - rect.top) / cellPx);
+        if (x<0||x>=SIZE||y<0||y>=SIZE) return null;
+        return { x, y };
+      }
+
+      function flashCell(x,y) {
+        const rect = canvas.getBoundingClientRect();
+        const cell = cellPx;
+        const padX = 0, padY = 0;
+        ctx.save();
+        ctx.strokeStyle = '#ff3355';
+        ctx.lineWidth = Math.max(2, Math.floor(cell*0.08));
+        ctx.strokeRect(padX + x*cell + 1, padY + y*cell + 1, cell - 2, cell - 2);
+        setTimeout(() => { ctx.restore(); draw(); }, 80);
+      }
+
+      // ボタン
+      revealEl.addEventListener('click', () => {
+        if (!hasImage) return;
+        showAnswer = !showAnswer;
+        revealEl.textContent = showAnswer ? '答えを隠す' : '答えを表示';
+        draw();
+      });
+      resetEl.addEventListener('click', () => {
+        if (!hasImage) return;
+        USER = emptyCanvas();
+        showAnswer = false;
+        revealEl.textContent = '答えを表示';
+        saveState(); draw();
+      });
+      // 追加: クリックでPDF保存
+      savePdfEl.addEventListener('click', exportPdf);
+
+      // 画像処理フロー
+      imgInput.addEventListener('change', async (e) => {
+        const file = e.target.files?.[0]; if (!file) return;
+        const url = URL.createObjectURL(file);
+        try {
+          const img = await loadImage(url);
+          await processImage(img);
+        } finally { URL.revokeObjectURL(url); }
+      });
+      guideUploadBtn.addEventListener('click', () => imgInput.click());
+
+      function loadImage(src) {
+        return new Promise((res, rej) => {
+          const img = new Image();
+          img.onload = () => res(img);
+          img.onerror = rej;
+          img.src = src;
+        });
+      }
+
+      async function processImage(img) {
+        try {
+          showLoading('画像処理中...', '色を抽出しています');
+          const colors = await extractColors(img);
+
+          showLoading('画像処理中...', 'パレットを更新しています');
+          updatePalette(colors);
+
+          showLoading('画像処理中...', `${SIZE}×${SIZE}の塗り絵に変換しています`);
+          ANSWER = imageToAnswer32(img);
+
+          showLoading('処理完了', 'データを保存しています');
+          USER = emptyCanvas();
+          hasImage = true;
+          uploadGuide.classList.add('hidden');
+          saveState();
+          renderPalette();
+
+          setTimeout(() => { hideLoading(); draw(); }, 400);
+        } catch (err) {
+          console.error('画像処理エラー:', err);
+          progressText.textContent = 'エラーが発生しました';
+          progressDetail.textContent = '別の画像を試してください';
+          setTimeout(hideLoading, 2000);
+        }
+      }
+
+      // 色抽出（簡易k-means）
+      async function extractColors(img) {
+        const c = document.createElement('canvas');
+        const size = Math.min(64, img.width, img.height);
+        c.width = size; c.height = size;
+        const cx = c.getContext('2d');
+        cx.drawImage(img, 0, 0, size, size);
+        const imageData = cx.getImageData(0, 0, size, size);
+        const data = imageData.data;
+
+        const pixels = [];
+        const skip = Math.max(1, Math.floor(size / 10));
+        for (let y=0; y<size; y+=skip) {
+          for (let x=0; x<size; x+=skip) {
+            const i = (y * size + x) * 4;
+            const r = data[i], g = data[i+1], b = data[i+2], a = data[i+3];
+            if (a < 128) continue;
+            const lum = (0.299*r + 0.587*g + 0.114*b);
+            if (lum > 240) continue;
+            pixels.push([r,g,b]);
+          }
+        }
+
+        if (pixels.length === 0) return defaultColors();
+        if (pixels.length < 4) return pixels.map(([r,g,b]) => rgbToHex(r,g,b));
+
+        const uniquePixels = new Set(pixels.map(p => `${p[0]},${p[1]},${p[2]}`));
+        const variety = uniquePixels.size / pixels.length;
+        let k = Math.max(4, Math.min(12, Math.round(4 + variety * 16)));
+        if (k > 8) k = Math.round((k + 8) / 2);
+
+        let centroids = initCentroids(pixels, k);
+        const iters = 5;
+        for (let t=0; t<iters; t++) {
+          const clusters = Array(k).fill().map(()=>[]);
+          for (const p of pixels) {
+            let best=0, dmin=Infinity;
+            for (let i=0;i<k;i++) {
+              const d = colorDistance(p, centroids[i]);
+              if (d<dmin) { dmin=d; best=i; }
+            }
+            clusters[best].push(p);
+          }
+          const next=[];
+          for (let i=0;i<k;i++) {
+            if (clusters[i].length===0) { next.push(centroids[i]); continue; }
+            const s=[0,0,0];
+            for (const p of clusters[i]) { s[0]+=p[0]; s[1]+=p[1]; s[2]+=p[2]; }
+            next.push([ Math.round(s[0]/clusters[i].length), Math.round(s[1]/clusters[i].length), Math.round(s[2]/clusters[i].length) ]);
+          }
+          centroids = next;
+        }
+        centroids.sort((a,b)=>{
+          const la=0.299*a[0]+0.587*a[1]+0.114*a[2];
+          const lb=0.299*b[0]+0.587*b[1]+0.114*b[2];
+          return lb-la;
+        });
+        return centroids.map(([r,g,b]) => rgbToHex(r,g,b));
+      }
+
+      function initCentroids(pixels, k) {
+        const cents=[];
+        const first = Math.floor(Math.random()*pixels.length);
+        cents.push([...pixels[first]]);
+        for (let i=1;i<k;i++) {
+          const dists = pixels.map(p=>{
+            let dmin=Infinity;
+            for (const c of cents) dmin=Math.min(dmin, colorDistance(p,c));
+            return dmin;
+          });
+          const sum = dists.reduce((a,b)=>a+b,0);
+          if (sum===0) { cents.push([...pixels[Math.floor(Math.random()*pixels.length)]]); continue; }
+          let target = Math.random()*sum, acc=0;
+          for (let j=0;j<dists.length;j++) { acc+=dists[j]; if (acc>=target) { cents.push([...pixels[j]]); break; } }
+        }
+        return cents;
+      }
+      function colorDistance(a,b){ return (a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2; }
+
+      function updatePalette(colors) {
+        while (colors.length < 4) colors.push(defaultColors()[colors.length]);
+        const names = colors.map(hex=>{
+          const {r,g,b}=hexToRgb(hex); const lum=0.299*r+0.587*g+0.114*b;
+          if (lum<40) return '黒'; if (lum<80) return '暗色'; if (lum<120) return '中暗色';
+          if (lum<180) return '中色'; if (lum<220) return '明色'; return '白';
+        });
+        PALETTE = colors.map((c,i)=>({ id:i+1, name:names[i], color:c }));
+        IDS = PALETTE.map(p=>p.id);
+        COLORS = Object.fromEntries(PALETTE.map(p=>[p.id, p.color]));
+        NAMES  = Object.fromEntries(PALETTE.map(p=>[p.id, p.name]));
+      }
+      function defaultColors(){ return ['#000000','#663333','#aa5555','#cc9966']; }
+
+      function imageToAnswer32(img) {
+        const off = document.createElement('canvas');
+        off.width = SIZE; off.height = SIZE;
+        const octx = off.getContext('2d', { willReadFrequently: true });
+
+        const iw = img.width, ih = img.height;
+        const srcAR = iw / ih;
+        let sx=0, sy=0, sw=iw, sh=ih;
+        // 修正: if の括弧を追加
+        if (srcAR > 1) { sw = ih; sx = Math.floor((iw - sw) / 2); }
+        else if (srcAR < 1) { sh = iw; sy = Math.floor((ih - sh) / 2); }
+        octx.imageSmoothingEnabled = false;
+        octx.drawImage(img, sx, sy, sw, sh, 0, 0, SIZE, SIZE);
+
+        const id = octx.getImageData(0,0,SIZE,SIZE);
+        const data = id.data;
+        const pal = PALETTE.map(p => hexToRgb(p.color));
+        const mat = Array.from({ length: SIZE }, () => Array(SIZE).fill(0)); // 0=背景
+
+        for (let y=0; y<SIZE; y++) {
+          for (let x=0; x<SIZE; x++) {
+            const idx = (y*SIZE + x) * 4;
+            const r = data[idx], g = data[idx+1], b = data[idx+2], a = data[idx+3];
+            mat[y][x] = pickNearestIndex(r,g,b,a, pal);
+          }
+        }
+        return denoise(mat, 1);
+      }
+
+      function pickNearestIndex(r,g,b,a, pal) {
+        if (a < 128) return 0;
+        const lum = 0.2126*r + 0.7152*g + 0.0722*b;
+        if (lum > 245) return 0;
+        let best=1, bestD=Infinity;
+        for (let i=0;i<pal.length;i++) {
+          const {r:pr,g:pg,b:pb} = pal[i];
+          const d = (r-pr)*(r-pr) + (g-pg)*(g-pg) + (b-pb)*(b-pb);
+          if (d < bestD) { bestD = d; best = i+1; }
+        }
+        return best;
+      }
+
+      function denoise(mat, radius=1) {
+        const out = mat.map(row => row.slice());
+        for (let y=0;y<SIZE;y++) for (let x=0;x<SIZE;x++) {
+          const hist = Array(PALETTE.length + 1).fill(0);
+          for (let dy=-radius; dy<=radius; dy++) for (let dx=-radius; dx<=radius; dx++) {
+            const yy=y+dy, xx=x+dx; if (yy<0||yy>=SIZE||xx<0||xx>=SIZE) continue;
+            hist[ mat[yy][xx] ]++;
+          }
+          let best=0, cnt=-1; const order=[0].concat(IDS);
+          for (const k of order) { if ((hist[k] ?? 0) > cnt) { cnt=hist[k]; best=k; } }
+          out[y][x] = best;
+        }
+        return out;
+      }
+
+      function rgbToHex(r,g,b){
+        return '#' + [r,g,b].map(x=>{
+          const hx = Math.max(0, Math.min(255, Math.round(x))).toString(16);
+          return hx.length===1 ? '0'+hx : hx;
+        }).join('');
+      }
+      function hexToRgb(hex){
+        const m = /^#?([a-f\d]{3}|[a-f\d]{6})$/i.exec(hex);
+        if (!m) return { r:255,g:255,b:255 };
+        let h=m[1]; if (h.length===3) h=h.split('').map(c=>c+c).join('');
+        const num = parseInt(h, 16);
+        return { r: (num >> 16) & 255, g: (num >> 8) & 255, b: num & 255 };
+      }
+
+      // 入力（クリック/ドラッグで塗る）
+      let pressed = false;
+      canvas.addEventListener('pointerdown', (e) => {
+        if (!hasImage) return;
+        pressed = true;
+        canvas.setPointerCapture(e.pointerId);
+        const c = posToCell(e); if (!c) return;
+        paintAt(c.x, c.y);
+      });
+      canvas.addEventListener('pointermove', (e) => {
+        if (!pressed || !hasImage) return;
+        const c = posToCell(e); if (!c) return;
+        paintAt(c.x, c.y);
+      });
+      const end = () => { pressed = false; };
+      canvas.addEventListener('pointerup', end);
+      canvas.addEventListener('pointercancel', end);
+      canvas.addEventListener('pointerleave', end);
+
+      // 正解色のみ塗る（背景0はスキップ）
+      function paintAt(x, y) {
+        const need = ANSWER[y][x];
+        if (need === 0) return; // 背景は塗らない（必要なら外す）
+        if (selected === need) {
+          USER[y][x] = selected;
+          saveState();
+          draw();
+        } else {
+          flashCell(x, y);
+        }
+      }
+
+      // 追加: PDFエクスポート（現在のキャンバス描画をA4にフィット）
+      function exportPdf() {
+        try {
+          const mod = window.jspdf || {};
+          const jsPDF = mod.jsPDF;
+          if (!jsPDF) {
+            alert('PDFライブラリの読み込みに失敗しました');
+            return;
+          }
+          // 最新状態で描画
+          draw();
+
+          // キャンバスをPNGとして取得
+          const dataUrl = canvas.toDataURL('image/png', 1.0);
+
+          // PDF作成（A4、向きは画像比率で自動）
+          const orientation = canvas.clientWidth >= canvas.clientHeight ? 'l' : 'p';
+          const pdf = new jsPDF({ orientation, unit: 'mm', format: 'a4' });
+
+          const pageW = pdf.internal.pageSize.getWidth();
+          const pageH = pdf.internal.pageSize.getHeight();
+          const margin = 10; // mm
+          const maxW = pageW - margin * 2;
+          const maxH = pageH - margin * 2;
+
+          const imgW = Math.max(1, canvas.clientWidth);
+          const imgH = Math.max(1, canvas.clientHeight);
+          const aspect = imgW / imgH;
+
+          let outW = maxW;
+          let outH = outW / aspect;
+          if (outH > maxH) {
+            outH = maxH;
+            outW = outH * aspect;
+          }
+          const x = (pageW - outW) / 2;
+          const y = (pageH - outH) / 2;
+
+          pdf.addImage(dataUrl, 'PNG', x, y, outW, outH, undefined, 'FAST');
+
+          const stamp = new Date().toISOString().replace(/[:T]/g, '-').split('.')[0];
+          const filename = `cat-painting-${SIZE}x${SIZE}-${stamp}.pdf`;
+          pdf.save(filename);
+        } catch (e) {
+          console.error(e);
+          alert('PDF保存に失敗しました');
+        }
+      }
+
+      // 追加: ズーム制御
+      function setZoom(v) {
+        zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v));
+        resizeCanvas();
+      }
+      function updateZoomLabel() {
+        zoomLabelEl.textContent = `x${zoom.toFixed(1)}`;
+      }
+      function fitToScreen() {
+        // フィットは zoom=1（baseCellそのまま）に設定
+        setZoom(1);
+      }
+      zoomInEl.addEventListener('click', () => setZoom(zoom * 1.25));
+      zoomOutEl.addEventListener('click', () => {
+        // 縮小でフィット状態に近づける（十分小さくなったら1にスナップ）
+        const next = zoom / 1.25;
+        setZoom(next <= 1.05 ? 1 : next);
+      });
+      fitEl.addEventListener('click', fitToScreen);
+      // キー操作: + / - / 0 or F で操作
+      window.addEventListener('keydown', (e) => {
+        if (e.key === '+' || e.key === '=') { setZoom(zoom * 1.25); }
+        else if (e.key === '-' || e.key === '_') { const n = zoom / 1.25; setZoom(n <= 1.05 ? 1 : n); }
+        else if (e.key === '0' || e.key.toLowerCase() === 'f') { fitToScreen(); }
+      });
+    </script>
+  </body>
+</html>
